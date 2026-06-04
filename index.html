@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>micrograd — Karpathy's Tiny Autograd Engine Explained</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/theme/black.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/monokai.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ==================== TITLE ==================== -->
+<section>
+    <h1 class="gradient-text">micrograd</h1>
+    <p class="subtitle">A scalar-valued automatic-differentiation engine,<br>spelled out from Andrej Karpathy's <em>Neural Networks: Zero to Hero</em></p>
+    <div class="meta-info">
+        <span>~100 lines of autograd</span> · <span>~50 lines of neural net</span> · <span>Pure Python, no NumPy</span>
+    </div>
+    <p class="nav-hint">Use <kbd>→</kbd> to advance · <kbd>↓</kbd> for sub-sections · <kbd>Esc</kbd> for overview</p>
+</section>
+
+<!-- ==================== ROADMAP ==================== -->
+<section>
+    <h2>Roadmap</h2>
+    <div class="roadmap" id="roadmap">
+        <div class="roadmap-item active" data-step="1">
+            <div class="roadmap-icon">🧮</div>
+            <div class="roadmap-label">What &amp; Why</div>
+        </div>
+        <div class="roadmap-arrow">→</div>
+        <div class="roadmap-item" data-step="2">
+            <div class="roadmap-icon">📦</div>
+            <div class="roadmap-label">The Value object</div>
+        </div>
+        <div class="roadmap-arrow">→</div>
+        <div class="roadmap-item" data-step="3">
+            <div class="roadmap-icon">⬅️</div>
+            <div class="roadmap-label">backward()</div>
+        </div>
+        <div class="roadmap-arrow">→</div>
+        <div class="roadmap-item" data-step="4">
+            <div class="roadmap-icon">🧠</div>
+            <div class="roadmap-label">Neurons &amp; MLP</div>
+        </div>
+        <div class="roadmap-arrow">→</div>
+        <div class="roadmap-item" data-step="5">
+            <div class="roadmap-icon">🏋️</div>
+            <div class="roadmap-label">Training loop</div>
+        </div>
+        <div class="roadmap-arrow">→</div>
+        <div class="roadmap-item" data-step="6">
+            <div class="roadmap-icon">🔥</div>
+            <div class="roadmap-label">vs PyTorch</div>
+        </div>
+    </div>
+</section>
+
+<!-- ==================== PART 1: WHAT & WHY ==================== -->
+<section>
+<section>
+    <h2 class="section-title">Part 1</h2>
+    <h1 class="gradient-text">What &amp; Why</h1>
+    <p>An autograd engine in a nutshell</p>
+</section>
+
+<section>
+    <h3>What is an autograd engine?</h3>
+    <div class="two-col">
+        <div class="col">
+            <div class="explain-box">
+                <p><strong>Autograd</strong> = <em>automatic differentiation</em>. You write an ordinary numerical expression; the engine quietly records every operation as a graph, then computes the derivative of the final output with respect to <em>every</em> input — exactly and automatically.</p>
+                <p><strong>Backpropagation</strong> is just <em>reverse-mode autodiff</em>: walk the graph backwards, applying the chain rule at each node.</p>
+            </div>
+            <div class="callout">
+                <p><strong>Why it matters:</strong> training a neural net <em>is</em> repeatedly asking "how should I nudge each weight to reduce the loss?" — that nudge direction is the gradient.</p>
+            </div>
+        </div>
+        <div class="col">
+            <pre><code class="language-python">from micrograd.engine import Value
+
+a = Value(-4.0)
+b = Value(2.0)
+c = a + b
+d = a * b + b**3
+c += c + 1
+c += 1 + c + (-a)
+d += d * 2 + (b + a).relu()
+d += 3 * d + (b - a).relu()
+e = c - d
+f = e**2
+g = f / 2.0
+g += 10.0 / f
+print(f'{g.data:.4f}')  # 24.7041 (forward)
+g.backward()
+print(f'{a.grad:.4f}')  # 138.8338 (dg/da)
+print(f'{b.grad:.4f}')  # 645.5773 (dg/db)</code></pre>
+        </div>
+    </div>
+</section>
+
+<section>
+    <h3>The expression graph</h3>
+    <p style="font-size:0.55em; color:var(--text-muted);">Every operation builds a node; arrows point from a result back to the operands that produced it.</p>
+    <svg viewBox="0 0 720 260" class="diagram">
+        <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                <polygon points="0 0, 10 3.5, 0 7" fill="rgba(255,255,255,0.4)"/>
+            </marker>
+        </defs>
+        <!-- leaves a, b, c, f -->
+        <rect x="20" y="40" width="90" height="44" rx="8" class="val-node"/>
+        <text x="65" y="58" class="node-label">a</text><text x="65" y="74" class="node-data">2.0</text>
+        <rect x="20" y="110" width="90" height="44" rx="8" class="val-node"/>
+        <text x="65" y="128" class="node-label">b</text><text x="65" y="144" class="node-data">-3.0</text>
+        <rect x="20" y="180" width="90" height="44" rx="8" class="val-node"/>
+        <text x="65" y="198" class="node-label">c</text><text x="65" y="214" class="node-data">10.0</text>
+        <!-- a*b -->
+        <circle cx="210" cy="97" r="18" class="op-circle"/><text x="210" y="103" class="op-symbol">×</text>
+        <rect x="260" y="75" width="90" height="44" rx="8" class="val-node op"/>
+        <text x="305" y="93" class="node-label">a·b</text><text x="305" y="109" class="node-data">-6.0</text>
+        <!-- + c -> e -->
+        <circle cx="420" cy="120" r="18" class="op-circle"/><text x="420" y="126" class="op-symbol">+</text>
+        <rect x="470" y="98" width="90" height="44" rx="8" class="val-node"/>
+        <text x="515" y="116" class="node-label">e</text><text x="515" y="132" class="node-data">-6.0 + 10.0</text>
+        <!-- *f -> L -->
+        <rect x="20" y="20" width="0" height="0"/>
+        <circle cx="620" cy="120" r="18" class="op-circle"/><text x="620" y="126" class="op-symbol">×</text>
+        <rect x="600" y="180" width="90" height="44" rx="8" class="val-node"/>
+        <text x="645" y="198" class="node-label">f</text><text x="645" y="214" class="node-data">-2.0</text>
+        <rect x="610" y="40" width="90" height="44" rx="8" class="val-node out"/>
+        <text x="655" y="58" class="node-label">L (output)</text><text x="655" y="74" class="node-data">-8.0</text>
+        <!-- edges -->
+        <line x1="110" y1="62" x2="194" y2="90" class="edge-line" marker-end="url(#arrow)"/>
+        <line x1="110" y1="132" x2="194" y2="104" class="edge-line" marker-end="url(#arrow)"/>
+        <line x1="228" y1="97" x2="260" y2="97" class="edge-line" marker-end="url(#arrow)"/>
+        <line x1="350" y1="97" x2="404" y2="113" class="edge-line" marker-end="url(#arrow)"/>
+        <line x1="110" y1="202" x2="404" y2="128" class="edge-line" marker-end="url(#arrow)"/>
+        <line x1="438" y1="120" x2="470" y2="120" class="edge-line" marker-end="url(#arrow)"/>
+        <line x1="560" y1="120" x2="604" y2="120" class="edge-line" marker-end="url(#arrow)"/>
+        <line x1="645" y1="180" x2="630" y2="138" class="edge-line" marker-end="url(#arrow)"/>
+        <line x1="638" y1="120" x2="655" y2="84" class="edge-line" marker-end="url(#arrow)"/>
+    </svg>
+    <div class="explain-box small">
+        <p>This dynamically constructed <strong>DAG</strong> (directed acyclic graph) is the whole trick. Forward pass fills in <code>.data</code>; the backward pass fills in <code>.grad</code> for every node.</p>
+    </div>
+</section>
+
+<section>
+    <h3>Why scalars, not tensors?</h3>
+    <div class="two-col">
+        <div class="col">
+            <div class="explain-box">
+                <p><strong>Real frameworks</strong> (PyTorch, JAX) operate on <em>tensors</em> — n-dimensional arrays — so a single op moves millions of numbers at once on a GPU.</p>
+                <p><strong>micrograd</strong> deliberately works on <em>single scalar values</em>. One <code>Value</code> wraps one float.</p>
+            </div>
+        </div>
+        <div class="col">
+            <div class="callout">
+                <p><strong>The point is clarity.</strong> By stripping away tensors, broadcasting, and CUDA, you see backpropagation in its purest form: a handful of local derivatives plus the chain rule. The maths is <em>identical</em> at tensor scale — just vectorised.</p>
+            </div>
+            <div class="stat-row">
+                <div class="stat"><span class="stat-num">~100</span><span class="stat-label">lines: engine.py</span></div>
+                <div class="stat"><span class="stat-num">~50</span><span class="stat-label">lines: nn.py</span></div>
+            </div>
+        </div>
+    </div>
+</section>
+</section>
+
+<!-- ==================== PART 2: THE VALUE OBJECT ==================== -->
+<section>
+<section>
+    <h2 class="section-title">Part 2</h2>
+    <h1 class="gradient-text">The Value object</h1>
+    <p>Wrapping a number so it remembers how it was made</p>
+</section>
+
+<section>
+    <h3>Value.__init__ — five fields</h3>
+    <pre><code class="language-python">class Value:
+    """ stores a single scalar value and its gradient """
+
+    def __init__(self, data, _children=(), _op=''):
+        self.data = data
+        self.grad = 0
+        # internal variables used for autograd graph construction
+        self._backward = lambda: None
+        self._prev = set(_children)
+        self._op = _op  # the op that produced this node, for debugging / graphviz</code></pre>
+    <div class="param-grid">
+        <div class="param-card" title="Click to learn more" onclick="this.classList.toggle('flipped')">
+            <div class="param-front"><strong>.data</strong><br>the number</div>
+            <div class="param-back">The actual scalar value carried forward through the graph</div>
+        </div>
+        <div class="param-card" title="Click to learn more" onclick="this.classList.toggle('flipped')">
+            <div class="param-front"><strong>.grad</strong><br>the derivative</div>
+            <div class="param-back">d(output)/d(this node). Starts at 0; filled in during backward()</div>
+        </div>
+        <div class="param-card" title="Click to learn more" onclick="this.classList.toggle('flipped')">
+            <div class="param-front"><strong>_prev</strong><br>children</div>
+            <div class="param-back">The set of Value nodes that were combined to produce this one — the graph edges</div>
+        </div>
+        <div class="param-card" title="Click to learn more" onclick="this.classList.toggle('flipped')">
+            <div class="param-front"><strong>_backward</strong><br>closure</div>
+            <div class="param-back">A function that applies this node's local derivative to push grad into its children</div>
+        </div>
+    </div>
+    <div class="explain-box small">
+        <p><code>_op</code> just records which operation produced the node ('+', '*', 'ReLU', …) — purely for visualisation and debugging.</p>
+    </div>
+</section>
+
+<section>
+    <h3>__add__ and __mul__ — local derivatives</h3>
+    <pre><code class="language-python">def __add__(self, other):
+    other = other if isinstance(other, Value) else Value(other)
+    out = Value(self.data + other.data, (self, other), '+')
+
+    def _backward():
+        self.grad  += out.grad      # d(a+b)/da = 1
+        other.grad += out.grad      # d(a+b)/db = 1
+    out._backward = _backward
+    return out
+
+def __mul__(self, other):
+    other = other if isinstance(other, Value) else Value(other)
+    out = Value(self.data * other.data, (self, other), '*')
+
+    def _backward():
+        self.grad  += other.data * out.grad   # d(a*b)/da = b
+        other.grad += self.data  * out.grad   # d(a*b)/db = a
+    out._backward = _backward
+    return out</code></pre>
+    <div class="explain-box">
+        <p><strong>The pattern:</strong> each operator (1) computes <code>out.data</code>, (2) wires <code>out</code> to its operands via <code>_children</code>, and (3) defines a closure that, <em>given</em> <code>out.grad</code>, distributes gradient to the inputs using the operation's local derivative — the chain rule, one node at a time.</p>
+        <p>Promoting plain numbers (<code>Value(other)</code>) lets you write <code>x + 1</code> naturally.</p>
+    </div>
+</section>
+
+<section>
+    <h3>__pow__ and relu — more rules</h3>
+    <pre><code class="language-python">def __pow__(self, other):
+    assert isinstance(other, (int, float)), "only supporting int/float powers"
+    out = Value(self.data**other, (self,), f'**{other}')
+
+    def _backward():
+        # d(x**n)/dx = n * x**(n-1)
+        self.grad += (other * self.data**(other-1)) * out.grad
+    out._backward = _backward
+    return out
+
+def relu(self):
+    out = Value(0 if self.data < 0 else self.data, (self,), 'ReLU')
+
+    def _backward():
+        # derivative of ReLU is 1 where active, 0 where clamped
+        self.grad += (out.data > 0) * out.grad
+    out._backward = _backward
+    return out</code></pre>
+    <div class="explain-box small">
+        <p><code>__pow__</code> only supports constant exponents — that is enough to express division (<code>a/b = a * b**-1</code>) and squaring for the loss. <code>relu</code> is the single nonlinearity in the canonical engine.</p>
+    </div>
+</section>
+
+<section>
+    <h3>Other ops &amp; the tanh / exp variants</h3>
+    <div class="two-col">
+        <div class="col">
+            <pre><code class="language-python"># dunder helpers built from the primitives
+def __neg__(self):       return self * -1
+def __radd__(self, o):   return self + o
+def __sub__(self, o):    return self + (-o)
+def __rsub__(self, o):   return o + (-self)
+def __rmul__(self, o):   return self * o
+def __truediv__(self, o):return self * o**-1
+def __rtruediv__(self,o):return o * self**-1
+
+def __repr__(self):
+    return f"Value(data={self.data}, grad={self.grad})"</code></pre>
+        </div>
+        <div class="col">
+            <pre><code class="language-python"># In the video, tanh / exp are derived the same way:
+def tanh(self):
+    x = self.data
+    t = (math.exp(2*x) - 1)/(math.exp(2*x) + 1)
+    out = Value(t, (self,), 'tanh')
+    def _backward():
+        # d tanh/dx = 1 - tanh(x)**2
+        self.grad += (1 - t**2) * out.grad
+    out._backward = _backward
+    return out
+
+def exp(self):
+    out = Value(math.exp(self.data), (self,), 'exp')
+    def _backward():
+        self.grad += out.data * out.grad  # d e^x = e^x
+    out._backward = _backward
+    return out</code></pre>
+        </div>
+    </div>
+    <div class="callout">
+        <p><strong>Compose, don't special-case.</strong> Because each primitive sets its own <code>_backward</code>, complex expressions like <code>(b - a).relu()</code> or a full tanh neuron just work — gradients flow through automatically.</p>
+    </div>
+</section>
+</section>
+
+<!-- ==================== PART 3: backward() ==================== -->
+<section>
+<section>
+    <h2 class="section-title">Part 3</h2>
+    <h1 class="gradient-text">backward()</h1>
+    <p>Reverse-mode autodiff over the whole graph</p>
+</section>
+
+<section>
+    <h3>The whole of backward() — 15 lines</h3>
+    <pre><code class="language-python">def backward(self):
+
+    # topological order all of the children in the graph
+    topo = []
+    visited = set()
+    def build_topo(v):
+        if v not in visited:
+            visited.add(v)
+            for child in v._prev:
+                build_topo(child)
+            topo.append(v)
+    build_topo(self)
+
+    # go one variable at a time and apply the chain rule to get its gradient
+    self.grad = 1
+    for v in reversed(topo):
+        v._backward()</code></pre>
+    <div class="explain-box">
+        <p><strong>Three moves:</strong> (1) build a <em>topological ordering</em> of the graph by depth-first search, (2) seed the output's gradient to <code>1.0</code> (since dL/dL = 1), (3) call each node's <code>_backward()</code> in <em>reverse</em> topological order.</p>
+    </div>
+</section>
+
+<section>
+    <h3>Why topological order &amp; why +=</h3>
+    <div class="two-col">
+        <div class="col">
+            <div class="explain-box">
+                <p><strong>Topo order</strong> guarantees that when we process a node, every node that <em>depends on it</em> has already contributed its share of the gradient. Process in reverse and each <code>out.grad</code> is fully accumulated before it is read.</p>
+            </div>
+        </div>
+        <div class="col">
+            <div class="callout">
+                <p><strong>Why <code>+=</code> not <code>=</code>?</strong> A node can feed into several downstream nodes (it is used more than once). The <em>multivariable chain rule</em> says those paths' gradients <em>add up</em>. Accumulating with <code>+=</code> is exactly this — and it is why <code>zero_grad()</code> must reset grads before each backward pass.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section>
+    <h3>Interactive: step gradients backward</h3>
+    <p style="font-size:0.5em; color:var(--text-muted);">Graph: <code>e = a*b</code>, then <code>L = (e + c) * f</code>. Click to push gradients backward one node at a time.</p>
+    <div class="interactive-demo graph-demo" id="backprop-demo">
+        <div class="graph-nodes">
+            <div class="gnode" id="bp-node-a">
+                <span class="gnode-name">a</span><span class="gnode-op">leaf</span>
+                <span class="gnode-data">2.00</span><span class="gnode-grad" id="bp-grad-a">grad 0.00</span>
+            </div>
+            <div class="gnode" id="bp-node-b">
+                <span class="gnode-name">b</span><span class="gnode-op">leaf</span>
+                <span class="gnode-data">-3.00</span><span class="gnode-grad" id="bp-grad-b">grad 0.00</span>
+            </div>
+            <span class="graph-arrow">→</span>
+            <div class="gnode" id="bp-node-e">
+                <span class="gnode-name">e = a*b</span><span class="gnode-op">×</span>
+                <span class="gnode-data">-6.00</span><span class="gnode-grad" id="bp-grad-e">grad 0.00</span>
+            </div>
+            <div class="gnode" id="bp-node-c">
+                <span class="gnode-name">c</span><span class="gnode-op">leaf</span>
+                <span class="gnode-data">10.00</span><span class="gnode-grad" id="bp-grad-c">grad 0.00</span>
+            </div>
+            <span class="graph-arrow">→</span>
+            <div class="gnode" id="bp-node-f">
+                <span class="gnode-name">f</span><span class="gnode-op">leaf</span>
+                <span class="gnode-data">-2.00</span><span class="gnode-grad" id="bp-grad-f">grad 0.00</span>
+            </div>
+            <span class="graph-arrow">→</span>
+            <div class="gnode" id="bp-node-L">
+                <span class="gnode-name">L = (e+c)*f</span><span class="gnode-op">output</span>
+                <span class="gnode-data">12.00</span><span class="gnode-grad" id="bp-grad-L">grad 0.00</span>
+            </div>
+        </div>
+        <div class="graph-status" id="bp-status"></div>
+        <div class="graph-controls">
+            <button class="demo-btn" id="bp-step-btn">Step backward ◀</button>
+            <button class="demo-btn" id="bp-reset-btn">Reset</button>
+        </div>
+    </div>
+</section>
+</section>
+
+<!-- ==================== PART 4: NEURONS, LAYERS, MLP ==================== -->
+<section>
+<section>
+    <h2 class="section-title">Part 4</h2>
+    <h1 class="gradient-text">Neurons, Layers, MLP</h1>
+    <p>nn.py — a PyTorch-shaped net on top of Value</p>
+</section>
+
+<section>
+    <h3>Module &amp; Neuron</h3>
+    <pre><code class="language-python">class Module:
+    def zero_grad(self):
+        for p in self.parameters():
+            p.grad = 0
+    def parameters(self):
+        return []
+
+class Neuron(Module):
+    def __init__(self, nin, nonlin=True):
+        self.w = [Value(random.uniform(-1,1)) for _ in range(nin)]
+        self.b = Value(0)
+        self.nonlin = nonlin
+
+    def __call__(self, x):
+        # w · x + b, then optional ReLU
+        act = sum((wi*xi for wi,xi in zip(self.w, x)), self.b)
+        return act.relu() if self.nonlin else act
+
+    def parameters(self):
+        return self.w + [self.b]</code></pre>
+    <div class="explain-box">
+        <p>A <strong>Neuron</strong> holds one <code>Value</code> weight per input plus a bias. Calling it builds the expression <code>w·x + b</code> — note <code>sum(..., self.b)</code> uses the bias as the start value — then applies ReLU. Every arithmetic op here is a <code>Value</code> op, so the graph is built automatically and is fully differentiable.</p>
+    </div>
+</section>
+
+<section>
+    <h3>Layer &amp; MLP</h3>
+    <pre><code class="language-python">class Layer(Module):
+    def __init__(self, nin, nout, **kwargs):
+        self.neurons = [Neuron(nin, **kwargs) for _ in range(nout)]
+
+    def __call__(self, x):
+        out = [n(x) for n in self.neurons]
+        return out[0] if len(out) == 1 else out
+
+    def parameters(self):
+        return [p for n in self.neurons for p in n.parameters()]
+
+class MLP(Module):
+    def __init__(self, nin, nouts):
+        sz = [nin] + nouts
+        self.layers = [Layer(sz[i], sz[i+1], nonlin=i!=len(nouts)-1)
+                       for i in range(len(nouts))]
+
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+    def parameters(self):
+        return [p for layer in self.layers for p in layer.parameters()]</code></pre>
+    <div class="explain-box small">
+        <p>A <strong>Layer</strong> is a list of Neurons; an <strong>MLP</strong> is a list of Layers chained together. <code>nonlin=i!=len(nouts)-1</code> makes the final layer <em>linear</em> (no ReLU) so it can output any real value. <code>parameters()</code> flattens every weight and bias for the optimiser.</p>
+    </div>
+</section>
+
+<section>
+    <h3>Building a net</h3>
+    <div class="two-col">
+        <div class="col">
+            <pre><code class="language-python">from micrograd.nn import MLP
+
+# 3 inputs → 4 → 4 → 1 output
+model = MLP(3, [4, 4, 1])
+print(model)
+# MLP of [Layer of [ReLUNeuron(3) x4],
+#         Layer of [ReLUNeuron(4) x4],
+#         Layer of [LinearNeuron(4)]]
+
+x = [2.0, 3.0, -1.0]
+y = model(x)          # a single Value
+print(y)              # Value(data=..., grad=0)
+
+print(len(model.parameters()))  # 41 learnable Values</code></pre>
+        </div>
+        <div class="col">
+            <div class="callout">
+                <p><strong>41 parameters?</strong><br>Layer 1: 4·(3+1) = 16<br>Layer 2: 4·(4+1) = 20<br>Layer 3: 1·(4+1) = 5<br>Total = <strong>41</strong> scalar Values, each one a node in the graph with its own gradient.</p>
+            </div>
+            <div class="explain-box small">
+                <p>The API mirrors PyTorch's <code>nn.Module</code> on purpose — <code>parameters()</code>, <code>zero_grad()</code>, callable forward — so the training loop looks familiar.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section>
+    <h3>Interactive: a single tanh neuron</h3>
+    <p style="font-size:0.5em; color:var(--text-muted);">Move the sliders for inputs <code>x</code> and weights <code>w</code>; watch the forward output and every gradient update live.</p>
+    <div class="interactive-demo neuron-demo" id="neuron-demo">
+        <div class="slider-row"><label>x1</label><input type="range" id="nx1" min="-3" max="3" step="0.1" value="2.0"><span class="slider-val" id="nx1-val">2.00</span></div>
+        <div class="slider-row"><label>x2</label><input type="range" id="nx2" min="-3" max="3" step="0.1" value="0.0"><span class="slider-val" id="nx2-val">0.00</span></div>
+        <div class="slider-row"><label>w1</label><input type="range" id="nw1" min="-3" max="3" step="0.1" value="-3.0"><span class="slider-val" id="nw1-val">-3.00</span></div>
+        <div class="slider-row"><label>w2</label><input type="range" id="nw2" min="-3" max="3" step="0.1" value="1.0"><span class="slider-val" id="nw2-val">1.00</span></div>
+        <div class="slider-row"><label>b</label><input type="range" id="nb" min="-3" max="3" step="0.1" value="6.8"><span class="slider-val" id="nb-val">6.80</span></div>
+        <div class="neuron-readout">
+            <div class="readout-card"><span class="rc-label">z = w·x + b</span><span class="rc-val" id="n-z">0.000</span></div>
+            <div class="readout-card"><span class="rc-label">out = tanh(z)</span><span class="rc-val" id="n-out">0.000</span></div>
+        </div>
+        <div class="neuron-readout">
+            <div class="readout-card grad"><span class="rc-label">∂o/∂x1</span><span class="rc-val" id="n-gx1">0.000</span></div>
+            <div class="readout-card grad"><span class="rc-label">∂o/∂x2</span><span class="rc-val" id="n-gx2">0.000</span></div>
+            <div class="readout-card grad"><span class="rc-label">∂o/∂w1</span><span class="rc-val" id="n-gw1">0.000</span></div>
+            <div class="readout-card grad"><span class="rc-label">∂o/∂w2</span><span class="rc-val" id="n-gw2">0.000</span></div>
+            <div class="readout-card grad"><span class="rc-label">∂o/∂b</span><span class="rc-val" id="n-gb">0.000</span></div>
+        </div>
+    </div>
+    <div class="explain-box small">
+        <p>Gradients use <code>d tanh/dz = 1 - tanh(z)²</code> times the local derivative: <code>∂o/∂w1 = (1-o²)·x1</code>, <code>∂o/∂b = (1-o²)</code>. When the neuron saturates (out near ±1) the gradients collapse toward zero — the vanishing-gradient problem, visible by hand.</p>
+    </div>
+</section>
+</section>
+
+<!-- ==================== PART 5: TRAINING LOOP ==================== -->
+<section>
+<section>
+    <h2 class="section-title">Part 5</h2>
+    <h1 class="gradient-text">Training loop</h1>
+    <p>Forward, loss, backward, update — repeat</p>
+</section>
+
+<section>
+    <h3>The four-step loop</h3>
+    <pre><code class="language-python">model = MLP(2, [16, 16, 1])     # 2-layer hidden MLP for the moons dataset
+
+for k in range(100):
+    # 1. forward: predictions for every example
+    scores = [model(x) for x in inputs]
+
+    # 2. loss: mean-squared error (or svm max-margin in the demo)
+    loss = sum((yi - si)**2 for yi, si in zip(targets, scores)) * (1.0/len(scores))
+
+    # 3. backward: zero old grads, then backprop
+    model.zero_grad()
+    loss.backward()
+
+    # 4. gradient-descent update: nudge each parameter downhill
+    learning_rate = 0.1
+    for p in model.parameters():
+        p.data -= learning_rate * p.grad
+
+    print(k, loss.data)</code></pre>
+    <div class="explain-box small">
+        <p>Notice the order: <code>zero_grad()</code> <em>before</em> <code>backward()</code> (because gradients accumulate with <code>+=</code>), and the update reads <code>p.grad</code> only after backprop has filled it in.</p>
+    </div>
+</section>
+
+<section>
+    <h3>The gradient-descent update</h3>
+    <div class="two-col">
+        <div class="col">
+            <pre><code class="language-python">for p in model.parameters():
+    p.data -= learning_rate * p.grad</code></pre>
+            <div class="explain-box">
+                <p><code>p.grad</code> is the direction in which the loss <em>increases</em> fastest. Subtracting a small multiple of it moves each weight in the direction that <em>decreases</em> the loss. <code>learning_rate</code> controls the step size.</p>
+            </div>
+        </div>
+        <div class="col">
+            <div class="callout">
+                <p><strong>Common bug:</strong> forget <code>zero_grad()</code> and gradients from previous steps keep accumulating, sending training haywire. micrograd makes the cause unmistakable — it is the same <code>+=</code> from Part 3.</p>
+            </div>
+            <div class="stat-row">
+                <div class="stat"><span class="stat-num">2</span><span class="stat-label">inputs (x, y)</span></div>
+                <div class="stat"><span class="stat-num">337</span><span class="stat-label">params (16,16,1)</span></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section>
+    <h3>The moons demo</h3>
+    <div class="two-col">
+        <div class="col">
+            <div class="explain-box">
+                <p>The classic notebook trains a 2-layer MLP on <code>sklearn</code>'s <strong>make_moons</strong> — two interleaving half-circles that are <em>not</em> linearly separable.</p>
+                <p>Using an SVM <strong>max-margin</strong> loss + L2 regularisation and plain SGD, the tiny scalar net learns a clean curved decision boundary in ~100 steps.</p>
+            </div>
+        </div>
+        <div class="col">
+            <div class="output-sample">
+                <div class="output-header">training log (abridged)</div>
+                <div class="output-body">step 0  loss 0.8348, acc 50.0%
+step 1  loss 0.5263, acc 80.0%
+step 5  loss 0.2168, acc 91.0%
+step 20 loss 0.0688, acc 97.0%
+step 50 loss 0.0259, acc 100.0%
+step 99 loss 0.0103, acc 100.0%</div>
+            </div>
+            <div class="explain-box small">
+                <p>100% training accuracy from ~150 lines of pure Python — no NumPy, no GPU. Every gradient was computed by the engine from Part 3.</p>
+            </div>
+        </div>
+    </div>
+</section>
+</section>
+
+<!-- ==================== PART 6: micrograd vs PyTorch ==================== -->
+<section>
+<section>
+    <h2 class="section-title">Part 6</h2>
+    <h1 class="gradient-text">micrograd vs PyTorch</h1>
+    <p>Same idea, different scale</p>
+</section>
+
+<section>
+    <h3>Same API shape</h3>
+    <div class="two-col">
+        <div class="col">
+            <pre><code class="language-python"># micrograd
+from micrograd.engine import Value
+from micrograd.nn import MLP
+
+x = [Value(2.0), Value(0.0)]
+model = MLP(2, [16, 16, 1])
+y = model(x)
+loss = (y - target)**2
+model.zero_grad()
+loss.backward()
+for p in model.parameters():
+    p.data -= 0.1 * p.grad</code></pre>
+        </div>
+        <div class="col">
+            <pre><code class="language-python"># PyTorch
+import torch
+import torch.nn as nn
+
+x = torch.tensor([2.0, 0.0])
+model = nn.Sequential(
+    nn.Linear(2,16), nn.ReLU(),
+    nn.Linear(16,16), nn.ReLU(),
+    nn.Linear(16,1))
+y = model(x)
+loss = (y - target)**2
+model.zero_grad()
+loss.backward()
+# optimiser.step() does p.data -= lr*p.grad</code></pre>
+        </div>
+    </div>
+    <div class="callout">
+        <p><strong>Look how little changes.</strong> <code>backward()</code>, <code>zero_grad()</code>, <code>parameters()</code>, the update rule — micrograd was built to mirror PyTorch so the leap to the real framework is tiny.</p>
+    </div>
+</section>
+
+<section>
+    <h3>Scalars vs tensors</h3>
+    <div class="comparison-table">
+        <table>
+            <thead>
+                <tr><th></th><th>micrograd</th><th>PyTorch</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Unit of data</td><td>one scalar (Value)</td><td>n-dim tensor</td></tr>
+                <tr><td>One node holds</td><td>1 float</td><td>millions of floats</td></tr>
+                <tr><td>Backward</td><td>per-scalar closures</td><td>fused tensor kernels</td></tr>
+                <tr><td>Hardware</td><td>CPU, pure Python</td><td>CPU / GPU / TPU</td></tr>
+                <tr><td>Nonlinearities</td><td>ReLU (tanh/exp in video)</td><td>dozens, optimised</td></tr>
+                <tr><td>Lines of code</td><td>~150</td><td>millions</td></tr>
+                <tr><td>Speed</td><td>slow but clear</td><td>fast and opaque</td></tr>
+            </tbody>
+        </table>
+        <p class="table-note">Why scalars are slow: a tensor op that PyTorch fuses into one GPU kernel becomes thousands of separate Python objects and closures in micrograd. Illuminating to read, hopeless to scale.</p>
+    </div>
+</section>
+
+<section>
+    <h3>How this scales up</h3>
+    <div class="explain-box">
+        <p><strong>The leap to tensors is mechanical.</strong> Replace each scalar local derivative with its matrix/broadcast equivalent: <code>__add__</code>'s "grad flows through unchanged" becomes a broadcasted sum-reduction; <code>__mul__</code>'s "multiply by the other operand" becomes a matrix product with the right transpose. The topological-sort-and-reverse skeleton of <code>backward()</code> is <em>exactly the same</em> in PyTorch's autograd.</p>
+        <p>Add GPU kernels, operator fusion, mixed precision and a huge op library, and you have a production framework — but the conceptual core is the ~100 lines you just read.</p>
+    </div>
+</section>
+</section>
+
+<!-- ==================== SUMMARY ==================== -->
+<section>
+<section>
+    <h2 class="gradient-text">micrograd at a glance</h2>
+    <div class="summary-grid">
+        <div class="summary-card">
+            <h4>The Value</h4>
+            <ul>
+                <li>.data — the scalar</li>
+                <li>.grad — the derivative</li>
+                <li>_prev — child nodes</li>
+                <li>_backward — local rule</li>
+            </ul>
+        </div>
+        <div class="summary-card">
+            <h4>Operations</h4>
+            <ul>
+                <li>+ · × · ** · ReLU</li>
+                <li>each sets a _backward</li>
+                <li>chain rule, locally</li>
+                <li>composes automatically</li>
+            </ul>
+        </div>
+        <div class="summary-card">
+            <h4>backward()</h4>
+            <ul>
+                <li>topological sort (DFS)</li>
+                <li>seed output grad = 1</li>
+                <li>reverse traversal</li>
+                <li>accumulate with +=</li>
+            </ul>
+        </div>
+        <div class="summary-card">
+            <h4>Training</h4>
+            <ul>
+                <li>forward → loss</li>
+                <li>zero_grad()</li>
+                <li>loss.backward()</li>
+                <li>p.data -= lr·p.grad</li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<section>
+    <h2>Where this fits in Zero-to-Hero</h2>
+    <div class="explain-box">
+        <p><strong>micrograd is lecture 1</strong> of Andrej Karpathy's <em>Neural Networks: Zero to Hero</em>. It builds the single most important primitive — backpropagation — entirely from scratch, so that every later lecture can lean on it.</p>
+    </div>
+    <div class="takeaways">
+        <div class="takeaway">
+            <span class="takeaway-num">→</span>
+            <p><strong>makemore</strong> reuses these ideas to build character-level language models — bigrams, MLPs, batchnorm, and WaveNet — now with tensors.</p>
+        </div>
+        <div class="takeaway">
+            <span class="takeaway-num">→</span>
+            <p><strong>nanoGPT / "Let's build GPT"</strong> scales the same autograd-plus-modules pattern into a full Transformer language model.</p>
+        </div>
+        <div class="takeaway">
+            <span class="takeaway-num">→</span>
+            <p><strong>The throughline:</strong> once you have understood backward() here, nothing in the bigger models is magic — only bigger.</p>
+        </div>
+    </div>
+</section>
+
+<section>
+    <h2>Key Takeaways</h2>
+    <div class="takeaways">
+        <div class="takeaway">
+            <span class="takeaway-num">1</span>
+            <p><strong>Backpropagation is just the chain rule, applied locally.</strong> Each operation knows only its own derivative; the engine stitches them together by walking the graph in reverse.</p>
+        </div>
+        <div class="takeaway">
+            <span class="takeaway-num">2</span>
+            <p><strong>A neural net is one big differentiable expression.</strong> Neurons, layers and an MLP are nothing but compositions of <code>Value</code> ops — so a single <code>loss.backward()</code> computes every gradient.</p>
+        </div>
+        <div class="takeaway">
+            <span class="takeaway-num">3</span>
+            <p><strong>Scale, not concept, separates this from PyTorch.</strong> Swap scalars for tensors and add GPU kernels; the ~150-line core you just read is the real thing, demystified.</p>
+        </div>
+    </div>
+    <div class="credits">
+        <p>Based on Andrej Karpathy's <a href="https://www.youtube.com/watch?v=VMj-3S1tku0" target="_blank">"The spelled-out intro to neural networks and backpropagation: building micrograd"</a></p>
+        <p>Code: <a href="https://github.com/karpathy/micrograd" target="_blank">github.com/karpathy/micrograd</a></p>
+    </div>
+</section>
+</section>
+
+</div><!-- /slides -->
+</div><!-- /reveal -->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/plugin/highlight/highlight.min.js"></script>
+<script src="interactive.js"></script>
+<script>
+Reveal.initialize({
+    hash: true,
+    slideNumber: true,
+    transition: 'slide',
+    backgroundTransition: 'fade',
+    plugins: [ RevealHighlight ],
+    width: 1200,
+    height: 700,
+    margin: 0.04,
+});
+</script>
+</body>
+</html>
